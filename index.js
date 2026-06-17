@@ -15,45 +15,104 @@ async function getInventario() {
     spreadsheetId: process.env.SHEET_ID,
     range: 'Sheet1!A:F',
   });
-  const [, ...rows] = res.data.values || [];
-  return rows.map(r => ({
-    producto: r[0] || '', precio: r[1] || '',
-    color: r[2] || '', bateria: r[3] || '',
-    estado: r[4] || '', categoria: r[5] || ''
-  }));
+  const rows = res.data.values || [];
+  rows.shift();
+  return rows.map(function(r) {
+    return {
+      producto: r[0] || '',
+      precio: r[1] || '',
+      color: r[2] || '',
+      bateria: r[3] || '',
+      estado: r[4] || '',
+      categoria: r[5] || ''
+    };
+  });
 }
 
 const conversaciones = {};
 
-app.get('/webhook', (req, res) => {
+app.get('/webhook', function(req, res) {
   if (req.query['hub.verify_token'] === process.env.VERIFY_TOKEN) {
     return res.send(req.query['hub.challenge']);
   }
   res.sendStatus(403);
 });
 
-app.post('/webhook', async (req, res) => {
+app.post('/webhook', async function(req, res) {
   res.sendStatus(200);
   try {
-    const value = req.body.entry?.[0]?.changes?.[0]?.value;
-    const msg = value?.messages?.[0];
+    const value = req.body.entry[0].changes[0].value;
+    const msg = value.messages[0];
     if (!msg || msg.type !== 'text') return;
 
     const from = msg.from;
     const texto = msg.text.body;
 
     const inventario = await getInventario();
-    const inventarioTexto = inventario.map(p =>
-      p.producto + ' | Color: ' + p.color + ' | Bateria: ' + p.bateria + ' | Estado: ' + p.estado + ' | Precio: ' + p.precio + ' | Categoria: ' + p.categoria
-    ).join('\n');
+    let inventarioTexto = '';
+    for (let i = 0; i < inventario.length; i++) {
+      const p = inventario[i];
+      inventarioTexto += p.producto + ' | Color: ' + p.color + ' | Bateria: ' + p.bateria + ' | Estado: ' + p.estado + ' | Precio: ' + p.precio + '\n';
+    }
 
-    if (!conversaciones[from]) conversaciones[from] = [];
+    if (!conversaciones[from]) {
+      conversaciones[from] = [];
+    }
     conversaciones[from].push({ role: 'user', content: texto });
-    if (conversaciones[from].length > 12) conversaciones[from] = conversaciones[from].slice(-12);
+    if (conversaciones[from].length > 10) {
+      conversaciones[from] = conversaciones[from].slice(-10);
+    }
 
     const claudeRes = await axios.post(
       'https://api.anthropic.com/v1/messages',
       {
         model: 'claude-sonnet-4-20250514',
-        max_tokens: 600,
-        system: 'Eres el asistente virtual de *Momentum Mobile*, tienda premium de tecnología Apple ubicada en Centro Comercial Monterrey, Local 031, Medellin, Colombia. Tu nombre es Momentum.\n\nHablas en espanol colombiano, amable, breve y profesional.\n\nINVENTARIO ACTUAL:\n' + inventarioTexto + '\n\nPUEDES AYUDAR CON:\n- PRECIOS Y DISPONIBILIDAD: Usa solo el inventario. Describe color, bateria y estado del equipo.\n- CREDITOS: 3 meses sin intereses, 6 meses sin intereses, 12 meses con interes minimo.\n- SOPORTE TECNICO: Garantia de 12 meses cubre defectos de fabrica.\n- DEVOLUCIONES: 30 dias con caja y factura original.\n- UBICACION: CC Monterrey Local 031. Lun-Sab 10am-8pm, Dom 11am-7pm.\n- CONTACTO: WhatsApp +57 323 921 4421\n\nREGLAS:\n- Maximo 3 parrafos cortos.\n- Si el cliente quiere comprar, pide su nombre y di que un
+        max_tokens: 500,
+        system: 'Eres el asistente de Momentum Mobile, tienda de tecnologia Apple en CC Monterrey Local 031, Medellin. Responde en espanol, breve y amable. INVENTARIO: ' + inventarioTexto + ' REGLAS: Usa solo el inventario para precios. Si quiere comprar pide su nombre. Si no puedes ayudar escribe: ESCALAR_AGENTE',
+        messages: conversaciones[from],
+      },
+      {
+        headers: {
+          'x-api-key': process.env.ANTHROPIC_API_KEY,
+          'anthropic-version': '2023-06-01',
+          'Content-Type': 'application/json',
+        }
+      }
+    );
+
+    let respuesta = claudeRes.data.content[0].text;
+    conversaciones[from].push({ role: 'assistant', content: respuesta });
+
+    if (respuesta.indexOf('ESCALAR_AGENTE') !== -1) {
+      respuesta = 'Te conecto con un asesor de Momentum Mobile ahora mismo. Un momento por favor!';
+      const resumen = conversaciones[from].slice(-4).map(function(m) {
+        return (m.role === 'user' ? 'Cliente: ' : 'Bot: ') + m.content;
+      }).join('\n');
+      await enviarMensaje(process.env.AGENTE_TEL, 'CLIENTE NECESITA ASESOR\nNumero: ' + from + '\n\n' + resumen);
+    }
+
+    await enviarMensaje(from, respuesta);
+
+  } catch (err) {
+    console.error('Error: ' + (err.message || 'unknown'));
+  }
+});
+
+async function enviarMensaje(to, texto) {
+  await axios.post(
+    'https://graph.facebook.com/v18.0/' + process.env.WHATSAPP_PHONE_ID + '/messages',
+    {
+      messaging_product: 'whatsapp',
+      to: to,
+      type: 'text',
+      text: { body: texto }
+    },
+    {
+      headers: { Authorization: 'Bearer ' + process.env.WHATSAPP_TOKEN }
+    }
+  );
+}
+
+app.listen(process.env.PORT || 3000, function() {
+  console.log('Momentum Bot activo');
+});
